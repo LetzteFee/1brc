@@ -1,0 +1,5 @@
+1brc
+Cargo.lock
+FlameGraph
+perf*
+target
