@@ -38,9 +38,6 @@ impl DebtVec {
         self.vec.clear();
         self.offset = 0;
     }
-    /*fn len(&self) -> usize {
-        self.vec.len() - self.offset
-    }*/
     fn extend(&mut self, slice: &[u8]) {
         self.vec.extend_from_slice(slice);
     }
@@ -54,14 +51,6 @@ struct Station {
     count: u128,
 }
 impl Station {
-    /*fn new() -> Station {
-        Station {
-            min: f64::MAX,
-            max: f64::MIN,
-            sum: 0,
-            count: 0,
-        }
-    }*/
     fn from(value: f64) -> Station {
         Station {
             min: value,
@@ -71,14 +60,8 @@ impl Station {
         }
     }
     fn update(&mut self, value: f64) {
-        if value < self.min {
-            // println!("{} is smaller than {}", value, self.min);
-            self.min = value;
-        }
-        if value > self.max {
-            // println!("{} is bigger than {}", value, self.max);
-            self.max = value;
-        }
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
         self.sum += (value * 10.0) as i128;
         self.count += 1;
     }
@@ -223,21 +206,6 @@ fn new_cycle(
         }
     }
 
-    /*
-    if copied_data_len < 256 {
-        // buffer_a likely has an offset but we only change the end of the vector;
-        // it copies but is does not matter because they're just bytes
-        buffer_a.vec.extend_from_slice(buffer_b.slice());
-        buffer_b.reset();
-    } else {
-        let index_linebreak: usize = find_linebreak(buffer_b.slice()).unwrap();
-        // linebreak does not get copied because size is not index
-        buffer_a.extend(buffer_b.pop_front(index_linebreak));
-        let linebreak: u8 = buffer_b.pop_front(1)[0];
-        assert_eq!(b'\n', linebreak);
-    }
-    */
-
     thread::spawn(move || {
         // println!("Thread Nr. {} spawned", thread_enumeration);
         let mut map: HashMap<String, Station> = HashMap::new();
@@ -253,12 +221,6 @@ fn new_cycle(
 }
 
 fn find_linebreak(buffer: &[u8]) -> Option<usize> {
-    /*
-    let string_slice: &str = match str::from_utf8(buffer) {
-        Ok(ok_string) => ok_string,
-        Err(u8r) => str::from_utf8(&buffer[..u8r.valid_up_to()]).unwrap()
-    };*/
-    // string_slice.find('\n').expect("slice should be long enough to contain a line break")
     for (index, byte) in buffer.iter().enumerate() {
         if *byte == b'\n' {
             return Some(index);
