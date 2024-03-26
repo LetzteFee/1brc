@@ -78,10 +78,10 @@ impl Station {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let path: &String = &args[1];
+    let mut args = env::args().skip(1);
+    let path = args.next().unwrap_or(String::from("1brc/data/measurements.txt"));
 
-    let file: fs::File = fs::File::open(path).unwrap();
+    let file: fs::File = fs::File::open(&path).unwrap();
     let mut map: HashMap<String, Station> = HashMap::new();
 
     thread_manager(file, &mut map);
@@ -128,22 +128,18 @@ fn thread_manager(mut file: fs::File, map: &mut HashMap<String, Station>) {
         panic!("buffer_size is bigger than entire file");
     }
 
-    {
-        let mut dynamic_buffer_size: usize = buffer_size / 2;
-        while n_current_threads < usize::from(max_threads) {
-            dynamic_buffer_size += buffer_size / 16;
-            buffer_a = new_cycle(
-                &mut file,
-                buffer_a,
-                DebtVec::with(dynamic_buffer_size),
-                tx.clone(),
-                // thread_enumeration,
-            );
-            // thread_enumeration += 1;
-            n_current_threads += 1;
-            if buffer_a.is_empty() {
-                break;
-            }
+    while n_current_threads < usize::from(max_threads) {
+        buffer_a = new_cycle(
+            &mut file,
+            buffer_a,
+            DebtVec::with(buffer_size / 2 + buffer_size / 16 * n_current_threads),
+            tx.clone(),
+            // thread_enumeration,
+        );
+        // thread_enumeration += 1;
+        n_current_threads += 1;
+        if buffer_a.is_empty() {
+            break;
         }
     }
 
