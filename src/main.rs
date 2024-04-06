@@ -55,6 +55,7 @@ impl Station {
             count: 1,
         }
     }
+    #[inline]
     fn update(&mut self, value: f64) {
         self.min = self.min.min(value);
         self.max = self.max.max(value);
@@ -79,9 +80,8 @@ struct BufferManager {
     size: usize,
 }
 impl BufferManager {
-    fn width(size: usize, mut file: fs::File) -> BufferManager {
-        let mut buffers: Vec<DebtVec> = Vec::new();
-        buffers.push(DebtVec::with(size));
+    fn with(size: usize, mut file: fs::File) -> BufferManager {
+        let mut buffers: Vec<DebtVec> = vec![DebtVec::with(size)];
 
         if file.read(buffers[0].slice_mut()).unwrap() < size {
             panic!("Buffer size is bigger than entire file");
@@ -93,8 +93,9 @@ impl BufferManager {
             size,
         }
     }
+    #[inline]
     fn request_buffer(&mut self) -> Option<DebtVec> {
-        if self.buffers.len() == 0 {
+        if self.buffers.is_empty() {
             return None;
         }
 
@@ -125,7 +126,7 @@ fn main() {
         .next()
         .unwrap_or(String::from("1brc/data/measurements.txt"));
 
-    let file: fs::File = fs::File::open(&path).unwrap();
+    let file: fs::File = fs::File::open(path).unwrap();
 
     process_map(create_map_from_file(file));
 }
@@ -144,6 +145,7 @@ fn process_map(mut map: HashMap<String, Station>) {
     }
     println!(" }}");
 }
+#[inline]
 fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<String, Station>) {
     for (name, tmp_station) in tmp_map.drain() {
         main_map
@@ -153,44 +155,24 @@ fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<Str
     }
 }
 fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
-    let mut map: HashMap<String, Station> = HashMap::new();
-    let max_threads: num::NonZeroUsize = match thread::available_parallelism() {
-        Ok(threads) => {
-            // println!("Number of threads: {}", threads);
-            threads
-        }
-        Err(_) => num::NonZeroUsize::new(8).unwrap(),
-    };
+    let mut map: HashMap<String, Station> = HashMap::default();
+    let max_threads: num::NonZeroUsize =
+        thread::available_parallelism().unwrap_or(num::NonZeroUsize::new(8).unwrap());
     let mut n_current_threads: usize = 0;
 
-    let buffer = Arc::new(Mutex::new(BufferManager::width(
-        12_000_000,
-        file,
-    )));
+    let buffer_manager: Arc<Mutex<BufferManager>> =
+        Arc::new(Mutex::new(BufferManager::with(12_000_000, file)));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
 
     while n_current_threads < usize::from(max_threads) {
-        let c_tx: Sender<HashMap<String, Station>> = tx.clone();
-        let c_buffer: Arc<Mutex<BufferManager>> = Arc::clone(&buffer);
-        thread::spawn(move || {
-            let mut t_map: HashMap<String, Station> = HashMap::with_capacity(10_000);
-            loop {
-                let thread_buffer: Option<DebtVec> = { c_buffer.lock().unwrap().request_buffer() };
-                match thread_buffer {
-                    Some(data) => process_valid_buffer(data.slice(), &mut t_map),
-                    None => break,
-                };
-            }
-            c_tx.send(t_map).unwrap();
-        });
-
+        new_thread(Arc::clone(&buffer_manager), tx.clone());
         n_current_threads += 1;
     }
 
     while let Ok(tmp_map) = rx.recv() {
         n_current_threads -= 1;
 
-        if map.len() == 0 {
+        if map.is_empty() {
             map = tmp_map;
         } else {
             update_maps(&mut map, tmp_map);
@@ -204,7 +186,7 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
     assert_eq!(n_current_threads, 0);
     map
 }
-
+#[inline(always)]
 fn find_linebreak(buffer: &[u8]) -> Option<usize> {
     for (index, byte) in buffer.iter().enumerate() {
         // TODO: Is this how UTF-8 works?
@@ -214,12 +196,26 @@ fn find_linebreak(buffer: &[u8]) -> Option<usize> {
     }
     None
 }
+fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<String, Station>>) {
+    thread::spawn(move || {
+        let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
+        loop {
+            let thread_buffer: Option<DebtVec> = { buffer_manager.lock().unwrap().request_buffer() };
+            match thread_buffer {
+                Some(data) => process_valid_buffer(data.slice(), &mut map),
+                None => break,
+            };
+        }
+        tx.send(map).unwrap();
+    });
+}
+#[inline(always)]
 fn process_valid_buffer(buffer: &[u8], map: &mut HashMap<String, Station>) {
     let string_slice = str::from_utf8(buffer).unwrap();
     for line in string_slice.lines() {
         let mut line_iter = line.split(';');
         let name: &str = line_iter.next().expect("line should contain something");
-        let value_str: &str = line_iter.next().expect(line);
+        let value_str: &str = line_iter.next().unwrap();
         let value: f64 = value_str
             .parse()
             .expect("second part should contain a valid number");
