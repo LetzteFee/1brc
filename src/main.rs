@@ -164,7 +164,7 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
     let mut n_current_threads: usize = 0;
 
     let buffer = Arc::new(Mutex::new(BufferManager::width(
-        8_000_000_000 / max_threads,
+        12_000_000,
         file,
     )));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
