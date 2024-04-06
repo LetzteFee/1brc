@@ -173,20 +173,15 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
         let c_tx: Sender<HashMap<String, Station>> = tx.clone();
         let c_buffer: Arc<Mutex<BufferManager>> = Arc::clone(&buffer);
         thread::spawn(move || {
-            let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
+            let mut t_map: HashMap<String, Station> = HashMap::with_capacity(10_000);
             loop {
                 let thread_buffer: Option<DebtVec> = { c_buffer.lock().unwrap().request_buffer() };
                 match thread_buffer {
-                    Some(data) => {
-                        let string_slice = str::from_utf8(data.slice()).unwrap();
-                        for line in string_slice.lines() {
-                            process_line(line, &mut map);
-                        }
-                    }
+                    Some(data) => process_valid_buffer(data.slice(), &mut t_map),
                     None => break,
                 };
             }
-            c_tx.send(map).unwrap();
+            c_tx.send(t_map).unwrap();
         });
 
         n_current_threads += 1;
@@ -219,17 +214,20 @@ fn find_linebreak(buffer: &[u8]) -> Option<usize> {
     }
     None
 }
-fn process_line(line: &str, map: &mut HashMap<String, Station>) {
-    let mut line_iter = line.split(';');
-    let name: &str = line_iter.next().expect("line should contain something");
-    let value_str: &str = line_iter.next().expect(line);
-    let value: f64 = value_str
-        .parse()
-        .expect("second part should contain a valid number");
+fn process_valid_buffer(buffer: &[u8], map: &mut HashMap<String, Station>) {
+    let string_slice = str::from_utf8(buffer).unwrap();
+    for line in string_slice.lines() {
+        let mut line_iter = line.split(';');
+        let name: &str = line_iter.next().expect("line should contain something");
+        let value_str: &str = line_iter.next().expect(line);
+        let value: f64 = value_str
+            .parse()
+            .expect("second part should contain a valid number");
 
-    if !map.contains_key(name) {
-        map.insert(String::from(name), Station::from(value));
-    } else {
-        map.get_mut(name).unwrap().update(value);
+        if !map.contains_key(name) {
+            map.insert(String::from(name), Station::from(value));
+        } else {
+            map.get_mut(name).unwrap().update(value);
+        }
     }
 }
