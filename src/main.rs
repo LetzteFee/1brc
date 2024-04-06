@@ -1,5 +1,5 @@
+use hashbrown::HashMap;
 use std::{
-    collections::HashMap,
     env, fs,
     io::Read,
     num, str,
@@ -47,6 +47,7 @@ struct Station {
     count: u128,
 }
 impl Station {
+    #[inline(always)]
     fn from(value: f64) -> Station {
         Station {
             min: value,
@@ -55,17 +56,19 @@ impl Station {
             count: 1,
         }
     }
-    #[inline]
+    #[inline(always)]
     fn update(&mut self, value: f64) {
         self.min = self.min.min(value);
         self.max = self.max.max(value);
         self.sum += (value * 10.0) as i128;
         self.count += 1;
     }
+    #[inline(always)]
     fn drain(self) -> String {
         let mean: f64 = (self.sum as f64) / (self.count as f64);
         format!("={:.1}/{:.1}/{:.1}", self.min, mean, self.max)
     }
+    #[inline(always)]
     fn join(&mut self, tmp_station: &Station) {
         self.min = self.min.min(tmp_station.min);
         self.max = self.max.max(tmp_station.max);
@@ -93,7 +96,7 @@ impl BufferManager {
             size,
         }
     }
-    #[inline]
+    #[inline(always)]
     fn request_buffer(&mut self) -> Option<DebtVec> {
         if self.buffers.is_empty() {
             return None;
@@ -108,16 +111,17 @@ impl BufferManager {
             Some(index_linebreak) => {
                 self.buffers[0].extend(tmp_buffer.pop_front(index_linebreak));
                 let _ = tmp_buffer.pop_front(1)[0];
+                let output = self.buffers.remove(0);
                 self.buffers.push(tmp_buffer);
+                Some(output)
             }
             None => {
                 // buffer_a likely has an offset but we only change the end of the vector;
                 // it copies but is does not matter because they're just bytes
                 self.buffers[0].vec.extend_from_slice(tmp_buffer.slice());
+                Some(self.buffers.remove(0))
             }
         }
-
-        Some(self.buffers.remove(0))
     }
 }
 fn main() {
@@ -161,7 +165,7 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
     let mut n_current_threads: usize = 0;
 
     let buffer_manager: Arc<Mutex<BufferManager>> =
-        Arc::new(Mutex::new(BufferManager::with(12_000_000, file)));
+        Arc::new(Mutex::new(BufferManager::with(40_000_000, file)));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
 
     while n_current_threads < usize::from(max_threads) {
@@ -196,34 +200,34 @@ fn find_linebreak(buffer: &[u8]) -> Option<usize> {
     }
     None
 }
+#[inline]
 fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<String, Station>>) {
     thread::spawn(move || {
         let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
         loop {
-            let thread_buffer: Option<DebtVec> = { buffer_manager.lock().unwrap().request_buffer() };
+            let thread_buffer: Option<DebtVec> =
+                { buffer_manager.lock().unwrap().request_buffer() };
             match thread_buffer {
-                Some(data) => process_valid_buffer(data.slice(), &mut map),
+                Some(data) => {
+                    let string_slice = str::from_utf8(data.slice()).unwrap();
+                    for line in string_slice.lines() {
+                        let mut line_iter = line.split(';');
+                        let name: &str = line_iter.next().expect("line should contain something");
+                        let value_str: &str = line_iter.next().unwrap();
+                        let value: f64 = value_str
+                            .parse()
+                            .expect("second part should contain a valid number");
+
+                        if !map.contains_key(name) {
+                            map.insert(String::from(name), Station::from(value));
+                        } else {
+                            map.get_mut(name).unwrap().update(value);
+                        }
+                    }
+                }
                 None => break,
             };
         }
         tx.send(map).unwrap();
     });
-}
-#[inline(always)]
-fn process_valid_buffer(buffer: &[u8], map: &mut HashMap<String, Station>) {
-    let string_slice = str::from_utf8(buffer).unwrap();
-    for line in string_slice.lines() {
-        let mut line_iter = line.split(';');
-        let name: &str = line_iter.next().expect("line should contain something");
-        let value_str: &str = line_iter.next().unwrap();
-        let value: f64 = value_str
-            .parse()
-            .expect("second part should contain a valid number");
-
-        if !map.contains_key(name) {
-            map.insert(String::from(name), Station::from(value));
-        } else {
-            map.get_mut(name).unwrap().update(value);
-        }
-    }
 }
