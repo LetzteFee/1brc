@@ -79,7 +79,9 @@ impl Station {
 
 fn main() {
     let mut args = env::args().skip(1);
-    let path = args.next().unwrap_or(String::from("1brc/data/measurements.txt"));
+    let path = args
+        .next()
+        .unwrap_or(String::from("1brc/data/measurements.txt"));
 
     let file: fs::File = fs::File::open(&path).unwrap();
     let mut map: HashMap<String, Station> = HashMap::new();
@@ -204,10 +206,13 @@ fn new_cycle(
 
     thread::spawn(move || {
         // println!("Thread Nr. {} spawned", thread_enumeration);
-        let mut map: HashMap<String, Station> = HashMap::new();
-        for line in str::from_utf8(buffer_a.slice()).unwrap().lines() {
+        let string_slice = str::from_utf8(buffer_a.slice()).unwrap();
+        let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
+        // let mut map: HashMap<String, Station> = HashMap::new();
+        for line in string_slice.lines() {
             process_line(line, &mut map);
         }
+        // println!("Map had size: {}", map.len());
         // println!("Thread Nr. {} finished", thread_enumeration);
         tx.send(map).unwrap();
         // println!("Thread Nr. {} received", thread_enumeration);
