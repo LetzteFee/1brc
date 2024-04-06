@@ -3,7 +3,10 @@ use std::{
     env, fs,
     io::Read,
     num, str,
-    sync::mpsc::{self, Sender},
+    sync::{
+        mpsc::{self, Sender},
+        Arc, Mutex,
+    },
     thread, vec,
 };
 
@@ -26,17 +29,10 @@ impl DebtVec {
     fn slice(&self) -> &[u8] {
         &self.vec[self.offset..]
     }
-    fn is_empty(&self) -> bool {
-        self.vec.len() <= self.offset
-    }
     fn pop_front(&mut self, size: usize) -> &[u8] {
         let old_offset: usize = self.offset;
         self.offset += size;
         &self.vec[old_offset..self.offset]
-    }
-    fn reset(&mut self) {
-        self.vec.clear();
-        self.offset = 0;
     }
     fn extend(&mut self, slice: &[u8]) {
         self.vec.extend_from_slice(slice);
@@ -77,6 +73,52 @@ impl Station {
     }
 }
 
+struct BufferManager {
+    file: fs::File,
+    buffers: Vec<DebtVec>,
+    size: usize,
+}
+impl BufferManager {
+    fn width(size: usize, mut file: fs::File) -> BufferManager {
+        let mut buffers: Vec<DebtVec> = Vec::new();
+        buffers.push(DebtVec::with(size));
+
+        if file.read(buffers[0].slice_mut()).unwrap() < size {
+            panic!("Buffer size is bigger than entire file");
+        }
+
+        BufferManager {
+            file,
+            buffers,
+            size,
+        }
+    }
+    fn request_buffer(&mut self) -> Option<DebtVec> {
+        if self.buffers.len() == 0 {
+            return None;
+        }
+
+        let mut tmp_buffer: DebtVec = DebtVec::with(self.size);
+        let copied_data_len: usize = self.file.read(tmp_buffer.slice_mut()).unwrap();
+        // at this point there is no offset
+        tmp_buffer.vec.resize(copied_data_len, 0);
+
+        match find_linebreak(tmp_buffer.slice()) {
+            Some(index_linebreak) => {
+                self.buffers[0].extend(tmp_buffer.pop_front(index_linebreak));
+                let _ = tmp_buffer.pop_front(1)[0];
+                self.buffers.push(tmp_buffer);
+            }
+            None => {
+                // buffer_a likely has an offset but we only change the end of the vector;
+                // it copies but is does not matter because they're just bytes
+                self.buffers[0].vec.extend_from_slice(tmp_buffer.slice());
+            }
+        }
+
+        Some(self.buffers.remove(0))
+    }
+}
 fn main() {
     let mut args = env::args().skip(1);
     let path = args
@@ -84,10 +126,10 @@ fn main() {
         .unwrap_or(String::from("1brc/data/measurements.txt"));
 
     let file: fs::File = fs::File::open(&path).unwrap();
-    let mut map: HashMap<String, Station> = HashMap::new();
 
-    thread_manager(file, &mut map);
-
+    process_map(create_map_from_file(file));
+}
+fn process_map(mut map: HashMap<String, Station>) {
     let mut result: Vec<String> = Vec::new();
     for (name, value) in map.drain() {
         let values: String = value.drain();
@@ -110,7 +152,8 @@ fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<Str
             .or_insert(tmp_station);
     }
 }
-fn thread_manager(mut file: fs::File, map: &mut HashMap<String, Station>) {
+fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
+    let mut map: HashMap<String, Station> = HashMap::new();
     let max_threads: num::NonZeroUsize = match thread::available_parallelism() {
         Ok(threads) => {
             // println!("Number of threads: {}", threads);
@@ -119,110 +162,57 @@ fn thread_manager(mut file: fs::File, map: &mut HashMap<String, Station>) {
         Err(_) => num::NonZeroUsize::new(8).unwrap(),
     };
     let mut n_current_threads: usize = 0;
-    // let mut thread_enumeration: usize = 0;
 
-    let buffer_size: usize = 8_000_000_000 / max_threads;
-
-    let mut buffer_a: DebtVec = DebtVec::with(buffer_size);
+    let buffer = Arc::new(Mutex::new(BufferManager::width(
+        8_000_000_000 / max_threads,
+        file,
+    )));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
 
-    if file.read(buffer_a.slice_mut()).unwrap() < buffer_size {
-        panic!("buffer_size is bigger than entire file");
-    }
-
     while n_current_threads < usize::from(max_threads) {
-        buffer_a = new_cycle(
-            &mut file,
-            buffer_a,
-            DebtVec::with(buffer_size / 2 + buffer_size / 16 * n_current_threads),
-            tx.clone(),
-            // thread_enumeration,
-        );
-        // thread_enumeration += 1;
-        n_current_threads += 1;
-        if buffer_a.is_empty() {
-            break;
-        }
-    }
+        let c_tx: Sender<HashMap<String, Station>> = tx.clone();
+        let c_buffer: Arc<Mutex<BufferManager>> = Arc::clone(&buffer);
+        thread::spawn(move || {
+            let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
+            loop {
+                let thread_buffer: Option<DebtVec> = { c_buffer.lock().unwrap().request_buffer() };
+                match thread_buffer {
+                    Some(data) => {
+                        let string_slice = str::from_utf8(data.slice()).unwrap();
+                        for line in string_slice.lines() {
+                            process_line(line, &mut map);
+                        }
+                    }
+                    None => break,
+                };
+            }
+            c_tx.send(map).unwrap();
+        });
 
-    let mut map_buffer: Vec<HashMap<String, Station>> = Vec::new();
+        n_current_threads += 1;
+    }
 
     while let Ok(tmp_map) = rx.recv() {
         n_current_threads -= 1;
 
-        if !buffer_a.is_empty() {
-            buffer_a = new_cycle(
-                &mut file,
-                buffer_a,
-                DebtVec::with(buffer_size),
-                tx.clone(),
-                // thread_enumeration,
-            );
-            // thread_enumeration += 1;
-            n_current_threads += 1;
+        if map.len() == 0 {
+            map = tmp_map;
+        } else {
+            update_maps(&mut map, tmp_map);
         }
 
-        map_buffer.push(tmp_map);
-
-        if n_current_threads < usize::from(max_threads) {
-            while let Some(tmp_map) = map_buffer.pop() {
-                update_maps(map, tmp_map);
-            }
-            if n_current_threads == 0 {
-                break;
-            }
+        if n_current_threads == 0 {
+            break;
         }
     }
 
-    assert!(map_buffer.is_empty());
     assert_eq!(n_current_threads, 0);
-}
-
-#[inline]
-fn new_cycle(
-    file: &mut fs::File,
-    mut buffer_a: DebtVec,
-    mut buffer_b: DebtVec,
-    tx: Sender<HashMap<String, Station>>,
-    // thread_enumeration: usize,
-) -> DebtVec {
-    let copied_data_len: usize = file.read(buffer_b.slice_mut()).unwrap();
-    // at this point there is no offset
-    buffer_b.vec.resize(copied_data_len, 0);
-
-    match find_linebreak(buffer_b.slice()) {
-        Some(index_linebreak) => {
-            buffer_a.extend(buffer_b.pop_front(index_linebreak));
-            let linebreak: u8 = buffer_b.pop_front(1)[0];
-            assert_eq!(b'\n', linebreak);
-        }
-        None => {
-            // buffer_a likely has an offset but we only change the end of the vector;
-            // it copies but is does not matter because they're just bytes
-            buffer_a.vec.extend_from_slice(buffer_b.slice());
-            buffer_b.reset();
-        }
-    }
-
-    thread::spawn(move || {
-        // println!("Thread Nr. {} spawned", thread_enumeration);
-        let string_slice = str::from_utf8(buffer_a.slice()).unwrap();
-        let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
-        // let mut map: HashMap<String, Station> = HashMap::new();
-        for line in string_slice.lines() {
-            process_line(line, &mut map);
-        }
-        // println!("Map had size: {}", map.len());
-        // println!("Thread Nr. {} finished", thread_enumeration);
-        tx.send(map).unwrap();
-        // println!("Thread Nr. {} received", thread_enumeration);
-    });
-
-    buffer_b
+    map
 }
 
 fn find_linebreak(buffer: &[u8]) -> Option<usize> {
     for (index, byte) in buffer.iter().enumerate() {
+        // TODO: Is this how UTF-8 works?
         if *byte == b'\n' {
             return Some(index);
         }
