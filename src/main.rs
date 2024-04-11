@@ -14,7 +14,6 @@ use std::{
     thread, vec,
 };
 
-
 // A type of vector that allows for .pop_front() in O(1)
 // by just remembering to ignore the first elements
 struct DebtVec {
@@ -107,7 +106,7 @@ impl BufferManager {
     }
     fn get_dynamic_size(&mut self) -> usize {
         if self.n_served_buffers + 1 >= usize::from(self.n_threads) {
-            self.size * 2
+            (self.size as f32 * 1.5) as usize
         } else {
             self.size
         }
@@ -220,7 +219,7 @@ fn find_linebreak(buffer: &[u8]) -> Option<usize> {
     }
     None
 }
-#[inline]
+#[inline(always)]
 fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<String, Station>>) {
     thread::spawn(move || {
         let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
@@ -228,26 +227,28 @@ fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<Stri
             let possible_buffer: Option<DebtVec> =
                 { buffer_manager.lock().unwrap().request_buffer() };
             match possible_buffer {
-                Some(buffer) => {
-                    let string_slice = str::from_utf8(buffer.slice()).unwrap();
-                    for line in string_slice.lines() {
-                        let mut line_iter = line.split(';');
-                        let name: &str = line_iter.next().expect("line should contain something");
-                        let value_str: &str = line_iter.next().unwrap();
-                        let value: f64 = value_str
-                            .parse()
-                            .expect("second part should contain a valid number");
-
-                        if !map.contains_key(name) {
-                            map.insert(String::from(name), Station::from(value));
-                        } else {
-                            map.get_mut(name).unwrap().update(value);
-                        }
-                    }
-                }
+                Some(buffer) => process_buffer(buffer.slice(), &mut map),
                 None => break,
             };
         }
         tx.send(map).unwrap();
     });
+}
+#[inline(always)]
+fn process_buffer(buffer: &[u8], map: &mut HashMap<String, Station>) {
+    let string_slice = unsafe { str::from_utf8_unchecked(buffer) };
+    for line in string_slice.lines() {
+        let mut line_iter = line.split(';');
+        let name: &str = line_iter.next().expect("line should contain something");
+        let value_str: &str = line_iter.next().unwrap();
+        let value: f64 = value_str
+            .parse()
+            .expect("second part should contain a valid number");
+
+        if !map.contains_key(name) {
+            map.insert(String::from(name), Station::from(value));
+        } else {
+            map.get_mut(name).unwrap().update(value);
+        }
+    }
 }
