@@ -1,14 +1,19 @@
+#[cfg(test)]
+mod tests;
+
 use hashbrown::HashMap;
 use std::{
     env, fs,
     io::Read,
-    num, str,
+    num::NonZeroUsize,
+    str,
     sync::{
         mpsc::{self, Sender},
         Arc, Mutex,
     },
     thread, vec,
 };
+
 
 // A type of vector that allows for .pop_front() in O(1)
 // by just remembering to ignore the first elements
@@ -65,8 +70,9 @@ impl Station {
     }
     #[inline(always)]
     fn drain(self) -> String {
-        let mean: f64 = (self.sum as f64) / (self.count as f64);
-        format!("={:.1}/{:.1}/{:.1}", self.min, mean, self.max)
+        let correct_sum: f64 = (self.sum as f64) / 10.0;
+        let mean: f64 = correct_sum / (self.count as f64);
+        format!("={}/{:.1}/{}", self.min, mean, self.max)
     }
     #[inline(always)]
     fn join(&mut self, tmp_station: &Station) {
@@ -81,37 +87,48 @@ struct BufferManager {
     file: fs::File,
     buffers: Vec<DebtVec>,
     size: usize,
+    n_threads: NonZeroUsize,
+    n_served_buffers: usize,
 }
 impl BufferManager {
-    fn with(size: usize, mut file: fs::File) -> BufferManager {
+    fn with(size: usize, mut file: fs::File, n_threads: NonZeroUsize) -> BufferManager {
         let mut buffers: Vec<DebtVec> = vec![DebtVec::with(size)];
 
-        if file.read(buffers[0].slice_mut()).unwrap() < size {
-            panic!("Buffer size is bigger than entire file");
-        }
+        let copied_data_len = file.read(buffers[0].slice_mut()).unwrap();
+        buffers[0].vec.resize(copied_data_len, 0);
 
         BufferManager {
             file,
             buffers,
             size,
+            n_threads,
+            n_served_buffers: 0,
         }
     }
+    fn get_dynamic_size(&mut self) -> usize {
+        if self.n_served_buffers + 1 >= usize::from(self.n_threads) {
+            self.size * 2
+        } else {
+            self.size
+        }
+    }
+
     #[inline(always)]
     fn request_buffer(&mut self) -> Option<DebtVec> {
         if self.buffers.is_empty() {
             return None;
         }
 
-        let mut tmp_buffer: DebtVec = DebtVec::with(self.size);
+        let mut tmp_buffer: DebtVec = DebtVec::with(self.get_dynamic_size());
         let copied_data_len: usize = self.file.read(tmp_buffer.slice_mut()).unwrap();
         // at this point there is no offset
         tmp_buffer.vec.resize(copied_data_len, 0);
-
+        self.n_served_buffers += 1;
         match find_linebreak(tmp_buffer.slice()) {
             Some(index_linebreak) => {
                 self.buffers[0].extend(tmp_buffer.pop_front(index_linebreak));
-                let _ = tmp_buffer.pop_front(1)[0];
-                let output = self.buffers.remove(0);
+                let _linebreak: &[u8] = tmp_buffer.pop_front(1);
+                let output = self.buffers.pop().unwrap();
                 self.buffers.push(tmp_buffer);
                 Some(output)
             }
@@ -119,7 +136,7 @@ impl BufferManager {
                 // buffer_a likely has an offset but we only change the end of the vector;
                 // it copies but is does not matter because they're just bytes
                 self.buffers[0].vec.extend_from_slice(tmp_buffer.slice());
-                Some(self.buffers.remove(0))
+                Some(self.buffers.pop().unwrap())
             }
         }
     }
@@ -159,13 +176,16 @@ fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<Str
     }
 }
 fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
-    let mut map: HashMap<String, Station> = HashMap::default();
-    let max_threads: num::NonZeroUsize =
-        thread::available_parallelism().unwrap_or(num::NonZeroUsize::new(8).unwrap());
+    let mut map: HashMap<String, Station> = HashMap::with_capacity(0);
+    let max_threads: NonZeroUsize =
+        thread::available_parallelism().unwrap_or(NonZeroUsize::new(8).unwrap());
     let mut n_current_threads: usize = 0;
 
-    let buffer_manager: Arc<Mutex<BufferManager>> =
-        Arc::new(Mutex::new(BufferManager::with(40_000_000, file)));
+    let buffer_manager: Arc<Mutex<BufferManager>> = Arc::new(Mutex::new(BufferManager::with(
+        40_000_000,
+        file,
+        max_threads,
+    )));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
 
     while n_current_threads < usize::from(max_threads) {
@@ -205,11 +225,11 @@ fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<Stri
     thread::spawn(move || {
         let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
         loop {
-            let thread_buffer: Option<DebtVec> =
+            let possible_buffer: Option<DebtVec> =
                 { buffer_manager.lock().unwrap().request_buffer() };
-            match thread_buffer {
-                Some(data) => {
-                    let string_slice = str::from_utf8(data.slice()).unwrap();
+            match possible_buffer {
+                Some(buffer) => {
+                    let string_slice = str::from_utf8(buffer.slice()).unwrap();
                     for line in string_slice.lines() {
                         let mut line_iter = line.split(';');
                         let name: &str = line_iter.next().expect("line should contain something");
