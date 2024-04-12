@@ -91,11 +91,9 @@ struct BufferManager {
     file: fs::File,
     buffers: Vec<DebtVec>,
     size: usize,
-    n_threads: NonZeroUsize,
-    n_served_buffers: usize,
 }
 impl BufferManager {
-    fn with(size: usize, mut file: fs::File, n_threads: NonZeroUsize) -> BufferManager {
+    fn with(mut file: fs::File, size: usize) -> BufferManager {
         let mut buffers: Vec<DebtVec> = vec![DebtVec::with(size)];
 
         let copied_data_len = file.read(buffers[0].slice_mut()).unwrap();
@@ -105,29 +103,18 @@ impl BufferManager {
             file,
             buffers,
             size,
-            n_threads,
-            n_served_buffers: 0,
         }
     }
-    fn get_dynamic_size(&mut self) -> usize {
-        if self.n_served_buffers + 1 >= usize::from(self.n_threads) && false {
-            (self.size as f32 * 1.5) as usize
-        } else {
-            self.size
-        }
-    }
-
     #[inline(always)]
     fn request_buffer(&mut self) -> Option<DebtVec> {
         if self.buffers.is_empty() {
             return None;
         }
 
-        let mut tmp_buffer: DebtVec = DebtVec::with(self.get_dynamic_size());
+        let mut tmp_buffer: DebtVec = DebtVec::with(self.size);
         let copied_data_len: usize = self.file.read(tmp_buffer.slice_mut()).unwrap();
         // at this point there is no offset
         tmp_buffer.vec.resize(copied_data_len, 0);
-        self.n_served_buffers += 1;
         match find_linebreak(tmp_buffer.slice()) {
             Some(index_linebreak) => {
                 self.buffers[0].extend(tmp_buffer.pop_front(index_linebreak));
@@ -183,11 +170,8 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
         thread::available_parallelism().unwrap_or(NonZeroUsize::new(8).unwrap());
     let mut n_current_threads: usize = 0;
 
-    let buffer_manager: Arc<Mutex<BufferManager>> = Arc::new(Mutex::new(BufferManager::with(
-        40_000_000,
-        file,
-        max_threads,
-    )));
+    let buffer_manager: Arc<Mutex<BufferManager>> =
+        Arc::new(Mutex::new(BufferManager::with(file, 40_000_000)));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
 
     while n_current_threads < usize::from(max_threads) {
