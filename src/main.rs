@@ -21,23 +21,28 @@ struct DebtVec {
     offset: usize,
 }
 impl DebtVec {
+    #[inline(always)]
     fn with(size: usize) -> DebtVec {
         DebtVec {
             vec: vec![0; size],
             offset: 0,
         }
     }
+    #[inline(always)]
     fn slice_mut(&mut self) -> &mut [u8] {
         &mut self.vec[self.offset..]
     }
+    #[inline(always)]
     fn slice(&self) -> &[u8] {
         &self.vec[self.offset..]
     }
+    #[inline(always)]
     fn pop_front(&mut self, size: usize) -> &[u8] {
         let old_offset: usize = self.offset;
         self.offset += size;
         &self.vec[old_offset..self.offset]
     }
+    #[inline(always)]
     fn extend(&mut self, slice: &[u8]) {
         self.vec.extend_from_slice(slice);
     }
@@ -105,7 +110,7 @@ impl BufferManager {
         }
     }
     fn get_dynamic_size(&mut self) -> usize {
-        if self.n_served_buffers + 1 >= usize::from(self.n_threads) {
+        if self.n_served_buffers + 1 >= usize::from(self.n_threads) && false {
             (self.size as f32 * 1.5) as usize
         } else {
             self.size
@@ -132,9 +137,7 @@ impl BufferManager {
                 Some(output)
             }
             None => {
-                // buffer_a likely has an offset but we only change the end of the vector;
-                // it copies but is does not matter because they're just bytes
-                self.buffers[0].vec.extend_from_slice(tmp_buffer.slice());
+                self.buffers[0].extend(tmp_buffer.slice());
                 Some(self.buffers.pop().unwrap())
             }
         }
@@ -223,13 +226,11 @@ fn find_linebreak(buffer: &[u8]) -> Option<usize> {
 fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<String, Station>>) {
     thread::spawn(move || {
         let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
-        loop {
-            let possible_buffer: Option<DebtVec> =
-                { buffer_manager.lock().unwrap().request_buffer() };
-            match possible_buffer {
-                Some(buffer) => process_buffer(buffer.slice(), &mut map),
-                None => break,
-            };
+        let mut possible_buffer: Option<DebtVec> =
+            { buffer_manager.lock().unwrap().request_buffer() };
+        while let Some(buffer) = possible_buffer {
+            process_buffer(buffer.slice(), &mut map);
+            possible_buffer = buffer_manager.lock().unwrap().request_buffer();
         }
         tx.send(map).unwrap();
     });
@@ -240,8 +241,9 @@ fn process_buffer(buffer: &[u8], map: &mut HashMap<String, Station>) {
     for line in string_slice.lines() {
         let mut line_iter = line.split(';');
         let name: &str = line_iter.next().expect("line should contain something");
-        let value_str: &str = line_iter.next().unwrap();
-        let value: f64 = value_str
+        let value: f64 = line_iter
+            .next()
+            .expect("line seems to not contain a semicolon")
             .parse()
             .expect("second part should contain a valid number");
 

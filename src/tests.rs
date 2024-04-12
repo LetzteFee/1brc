@@ -10,5 +10,5 @@ fn test_station() {
     let mut station = Station::from(0.5);
     station.update(-5.1);
     station.update(5.1);
-    assert_eq!("=-5.1/0.2/5.1", &station.drain());
+    assert_eq!(String::from("=-5.1/0.2/5.1"), station.drain());
 }
