@@ -4,7 +4,7 @@ mod tests;
 use hashbrown::HashMap;
 use std::{
     env, fs,
-    io::Read,
+    io::{self, stdout, Read, Write},
     num::NonZeroUsize,
     str,
     sync::{
@@ -45,6 +45,10 @@ impl DebtVec {
     #[inline(always)]
     fn extend(&mut self, slice: &[u8]) {
         self.vec.extend_from_slice(slice);
+    }
+    #[inline(always)]
+    fn adjust_len(&mut self, new_len: usize) {
+        self.vec.resize(new_len + self.offset, 0);
     }
 }
 
@@ -89,56 +93,51 @@ impl Station {
 
 struct BufferManager {
     file: fs::File,
-    buffers: Vec<DebtVec>,
+    buffer: Option<DebtVec>,
     size: usize,
 }
 impl BufferManager {
     fn with(mut file: fs::File, size: usize) -> BufferManager {
-        let mut buffers: Vec<DebtVec> = vec![DebtVec::with(size)];
+        let mut dvec: DebtVec = DebtVec::with(size);
 
-        let copied_data_len = file.read(buffers[0].slice_mut()).unwrap();
-        buffers[0].vec.resize(copied_data_len, 0);
+        let copied_data_len = file.read(dvec.slice_mut()).unwrap();
+        dvec.vec.resize(copied_data_len, 0);
 
         BufferManager {
             file,
-            buffers,
+            buffer: Some(dvec),
             size,
         }
     }
     #[inline(always)]
     fn request_buffer(&mut self) -> Option<DebtVec> {
-        if self.buffers.is_empty() {
-            return None;
-        }
-
-        let mut tmp_buffer: DebtVec = DebtVec::with(self.size);
-        let copied_data_len: usize = self.file.read(tmp_buffer.slice_mut()).unwrap();
-        // at this point there is no offset
-        tmp_buffer.vec.resize(copied_data_len, 0);
-        match find_linebreak(tmp_buffer.slice()) {
+        let mut output_buffer: DebtVec = self.buffer.take()?;
+        let mut new_buffer: DebtVec = DebtVec::with(self.size);
+        let copied_data_len: usize = self.file.read(new_buffer.slice_mut()).unwrap();
+        new_buffer.adjust_len(copied_data_len);
+        match find_linebreak(new_buffer.slice()) {
             Some(index_linebreak) => {
-                self.buffers[0].extend(tmp_buffer.pop_front(index_linebreak));
-                let _linebreak: &[u8] = tmp_buffer.pop_front(1);
-                let output = self.buffers.pop().unwrap();
-                self.buffers.push(tmp_buffer);
-                Some(output)
+                output_buffer.extend(new_buffer.pop_front(index_linebreak));
+                let _linebreak: &[u8] = new_buffer.pop_front(1);
+                self.buffer = Some(new_buffer);
+                Some(output_buffer)
             }
             None => {
-                self.buffers[0].extend(tmp_buffer.slice());
-                Some(self.buffers.pop().unwrap())
+                output_buffer.extend(new_buffer.slice());
+                Some(output_buffer)
             }
         }
     }
 }
-fn main() {
+fn main() -> io::Result<()> {
     let mut args = env::args().skip(1);
     let path = args
         .next()
         .unwrap_or(String::from("1brc/data/measurements.txt"));
 
-    let file: fs::File = fs::File::open(path).unwrap();
+    let file: fs::File = fs::File::open(path)?;
 
-    process_map(create_map_from_file(file));
+    Ok(process_map(create_map_from_file(file)))
 }
 fn process_map(mut map: HashMap<String, Station>) {
     let mut result: Vec<String> = Vec::new();
@@ -148,12 +147,14 @@ fn process_map(mut map: HashMap<String, Station>) {
     }
     result.sort();
 
+    let mut lock = stdout().lock();
+
     let mut iter: vec::IntoIter<String> = result.into_iter();
-    print!("{{ {}", iter.next().unwrap());
+    write!(lock, "{{ {}", iter.next().unwrap()).unwrap();
     for element in iter {
-        print!(", {}", element);
+        write!(lock, ", {}", element).unwrap();
     }
-    println!(" }}");
+    writeln!(lock, " }}").unwrap();
 }
 #[inline]
 fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<String, Station>) {
@@ -180,7 +181,7 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
     }
 
     loop {
-        let tmp_map = rx.recv().unwrap();
+        let tmp_map: HashMap<String, Station> = rx.recv().unwrap();
         n_current_threads -= 1;
 
         if map.is_empty() {
@@ -225,14 +226,14 @@ fn process_buffer(buffer: &[u8], map: &mut HashMap<String, Station>) {
         let name: &str = line_iter.next().expect("line should contain something");
         let value: f64 = line_iter
             .next()
-            .expect("line seems to not contain a semicolon")
+            .expect("line should contain a semicolon")
             .parse()
             .expect("second part should contain a valid number");
 
-        if !map.contains_key(name) {
-            map.insert(String::from(name), Station::from(value));
-        } else {
+        if map.contains_key(name) {
             map.get_mut(name).unwrap().update(value);
+        } else {
+            map.insert(String::from(name), Station::from(value));
         }
     }
 }
