@@ -179,7 +179,8 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
         n_current_threads += 1;
     }
 
-    while let Ok(tmp_map) = rx.recv() {
+    loop {
+        let tmp_map = rx.recv().unwrap();
         n_current_threads -= 1;
 
         if map.is_empty() {
@@ -189,12 +190,9 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
         }
 
         if n_current_threads == 0 {
-            break;
+            return map;
         }
     }
-
-    assert_eq!(n_current_threads, 0);
-    map
 }
 #[inline(always)]
 fn find_linebreak(buffer: &[u8]) -> Option<usize> {
