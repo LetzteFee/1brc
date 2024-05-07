@@ -4,7 +4,7 @@ mod tests;
 use hashbrown::HashMap;
 use std::{
     env, fs,
-    io::{self, stdout, Read, Write},
+    io::{self, Read, Write},
     num::NonZeroUsize,
     str,
     sync::{
@@ -71,8 +71,12 @@ impl Station {
     }
     #[inline(always)]
     fn update(&mut self, value: f64) {
-        self.min = self.min.min(value);
-        self.max = self.max.max(value);
+        if value < self.min {
+            self.min = value;
+        }
+        if value > self.max {
+            self.max = value;
+        }
         self.sum += (value * 10.0) as i128;
         self.count += 1;
     }
@@ -84,8 +88,12 @@ impl Station {
     }
     #[inline(always)]
     fn join(&mut self, tmp_station: &Station) {
-        self.min = self.min.min(tmp_station.min);
-        self.max = self.max.max(tmp_station.max);
+        if tmp_station.min < self.min {
+            self.min = tmp_station.min;
+        }
+        if tmp_station.max > self.max {
+            self.max = tmp_station.max;
+        }
         self.sum += tmp_station.sum;
         self.count += tmp_station.count;
     }
@@ -135,10 +143,17 @@ fn main() -> io::Result<()> {
         .next()
         .unwrap_or(String::from("1brc/data/measurements.txt"));
 
+    let buffer_size: usize = match args.next() {
+        Some(string) => string.parse().unwrap(),
+        None => 100_000_000,
+    };
+
     let file: fs::File = fs::File::open(path)?;
 
-    Ok(process_map(create_map_from_file(file)))
+    process_map(create_map_from_file(file, buffer_size));
+    Ok(())
 }
+#[inline(always)]
 fn process_map(mut map: HashMap<String, Station>) {
     let mut result: Vec<String> = Vec::new();
     for (name, value) in map.drain() {
@@ -147,7 +162,7 @@ fn process_map(mut map: HashMap<String, Station>) {
     }
     result.sort();
 
-    let mut lock = stdout().lock();
+    let mut lock = io::stdout().lock();
 
     let mut iter: vec::IntoIter<String> = result.into_iter();
     write!(lock, "{{ {}", iter.next().unwrap()).unwrap();
@@ -165,14 +180,14 @@ fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<Str
             .or_insert(tmp_station);
     }
 }
-fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
+fn create_map_from_file(file: fs::File, buffer_size: usize) -> HashMap<String, Station> {
     let mut map: HashMap<String, Station> = HashMap::with_capacity(0);
     let max_threads: NonZeroUsize =
         thread::available_parallelism().unwrap_or(NonZeroUsize::new(8).unwrap());
     let mut n_current_threads: usize = 0;
 
     let buffer_manager: Arc<Mutex<BufferManager>> =
-        Arc::new(Mutex::new(BufferManager::with(file, 40_000_000)));
+        Arc::new(Mutex::new(BufferManager::with(file, buffer_size)));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
 
     while n_current_threads < usize::from(max_threads) {
