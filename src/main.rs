@@ -14,44 +14,6 @@ use std::{
     thread, vec,
 };
 
-// A type of vector that allows for .pop_front() in O(1)
-// by just remembering to ignore the first elements
-struct DebtVec {
-    vec: Vec<u8>,
-    offset: usize,
-}
-impl DebtVec {
-    #[inline(always)]
-    fn with(size: usize) -> DebtVec {
-        DebtVec {
-            vec: vec![0; size],
-            offset: 0,
-        }
-    }
-    #[inline(always)]
-    fn slice_mut(&mut self) -> &mut [u8] {
-        &mut self.vec[self.offset..]
-    }
-    #[inline(always)]
-    fn slice(&self) -> &[u8] {
-        &self.vec[self.offset..]
-    }
-    #[inline(always)]
-    fn pop_front(&mut self, size: usize) -> &[u8] {
-        let old_offset: usize = self.offset;
-        self.offset += size;
-        &self.vec[old_offset..self.offset]
-    }
-    #[inline(always)]
-    fn extend(&mut self, slice: &[u8]) {
-        self.vec.extend_from_slice(slice);
-    }
-    #[inline(always)]
-    fn adjust_len(&mut self, new_len: usize) {
-        self.vec.resize(new_len + self.offset, 0);
-    }
-}
-
 #[derive(Debug)]
 struct Station {
     min: f64,
@@ -101,40 +63,32 @@ impl Station {
 
 struct BufferManager {
     file: fs::File,
-    buffer: Option<DebtVec>,
+    buffer: Option<Vec<u8>>,
     size: usize,
 }
 impl BufferManager {
-    fn with(mut file: fs::File, size: usize) -> BufferManager {
-        let mut dvec: DebtVec = DebtVec::with(size);
-
-        let copied_data_len = file.read(dvec.slice_mut()).unwrap();
-        dvec.vec.resize(copied_data_len, 0);
-
+    fn with(file: fs::File, size: usize) -> BufferManager {
         BufferManager {
             file,
-            buffer: Some(dvec),
+            buffer: Some(Vec::with_capacity(size)),
             size,
         }
     }
     #[inline(always)]
-    fn request_buffer(&mut self) -> Option<DebtVec> {
-        let mut output_buffer: DebtVec = self.buffer.take()?;
-        let mut new_buffer: DebtVec = DebtVec::with(self.size);
-        let copied_data_len: usize = self.file.read(new_buffer.slice_mut()).unwrap();
-        new_buffer.adjust_len(copied_data_len);
-        match find_linebreak(new_buffer.slice()) {
-            Some(index_linebreak) => {
-                output_buffer.extend(new_buffer.pop_front(index_linebreak));
-                let _linebreak: &[u8] = new_buffer.pop_front(1);
-                self.buffer = Some(new_buffer);
-                Some(output_buffer)
-            }
-            None => {
-                output_buffer.extend(new_buffer.slice());
-                Some(output_buffer)
-            }
+    fn request_buffer(&mut self) -> Option<Vec<u8>> {
+        let mut old_buffer: Vec<u8> = self.buffer.take()?;
+        let old_length: usize = old_buffer.len();
+        old_buffer.resize(self.size, 0);
+        let copied_data_len: usize = self.file.read(&mut old_buffer[old_length..]).unwrap();
+        old_buffer.resize(old_length + copied_data_len, 0);
+
+        if old_buffer.len() == self.size {
+            let new_buffer: Vec<u8> =
+                old_buffer.split_off(find_last_linebreak(&old_buffer).unwrap() + 1);
+            let _ = old_buffer.pop().unwrap();
+            self.buffer = Some(new_buffer);
         }
+        Some(old_buffer)
     }
 }
 fn main() -> io::Result<()> {
@@ -149,12 +103,12 @@ fn main() -> io::Result<()> {
     };
 
     let file: fs::File = fs::File::open(path)?;
-
-    process_map(create_map_from_file(file, buffer_size));
+    let map = create_map_from_file(file, buffer_size);
+    print_map(map);
     Ok(())
 }
 #[inline(always)]
-fn process_map(mut map: HashMap<String, Station>) {
+fn print_map(mut map: HashMap<String, Station>) {
     let mut result: Vec<String> = Vec::new();
     for (name, value) in map.drain() {
         let values: String = value.drain();
@@ -211,8 +165,8 @@ fn create_map_from_file(file: fs::File, buffer_size: usize) -> HashMap<String, S
     }
 }
 #[inline(always)]
-fn find_linebreak(buffer: &[u8]) -> Option<usize> {
-    for (index, byte) in buffer.iter().enumerate() {
+fn find_last_linebreak(buffer: &[u8]) -> Option<usize> {
+    for (index, byte) in buffer.iter().enumerate().rev() {
         // TODO: Is this how UTF-8 works?
         if *byte == b'\n' {
             return Some(index);
@@ -224,10 +178,10 @@ fn find_linebreak(buffer: &[u8]) -> Option<usize> {
 fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<String, Station>>) {
     thread::spawn(move || {
         let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
-        let mut possible_buffer: Option<DebtVec> =
+        let mut possible_buffer: Option<Vec<u8>> =
             { buffer_manager.lock().unwrap().request_buffer() };
         while let Some(buffer) = possible_buffer {
-            process_buffer(buffer.slice(), &mut map);
+            process_buffer(&buffer, &mut map);
             possible_buffer = buffer_manager.lock().unwrap().request_buffer();
         }
         tx.send(map).unwrap();
