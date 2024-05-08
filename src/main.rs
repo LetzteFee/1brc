@@ -64,31 +64,50 @@ impl Station {
 struct BufferManager {
     file: fs::File,
     buffer: Option<Vec<u8>>,
-    size: usize,
+    buffer_offset: usize,
+    buffer_size: usize,
+    buffer_storage: Vec<Vec<u8>>,
 }
 impl BufferManager {
     fn with(file: fs::File, size: usize) -> BufferManager {
         BufferManager {
             file,
-            buffer: Some(Vec::with_capacity(size)),
-            size,
+            buffer: Some(vec![0; size]),
+            buffer_offset: 0,
+            buffer_size: size,
+            buffer_storage: Vec::new(),
         }
     }
     #[inline(always)]
     fn request_buffer(&mut self) -> Option<Vec<u8>> {
         let mut old_buffer: Vec<u8> = self.buffer.take()?;
-        let old_length: usize = old_buffer.len();
-        old_buffer.resize(self.size, 0);
-        let copied_data_len: usize = self.file.read(&mut old_buffer[old_length..]).unwrap();
-        old_buffer.resize(old_length + copied_data_len, 0);
+        let copied_data_len: usize = self
+            .file
+            .read(&mut old_buffer[self.buffer_offset..])
+            .unwrap();
 
-        if old_buffer.len() == self.size {
-            let new_buffer: Vec<u8> =
-                old_buffer.split_off(find_last_linebreak(&old_buffer).unwrap() + 1);
-            let _ = old_buffer.pop().unwrap();
+        if self.buffer_offset + copied_data_len < self.buffer_size {
+            old_buffer.truncate(self.buffer_offset + copied_data_len);
+            match old_buffer.is_empty() {
+                true => None,
+                false => Some(old_buffer),
+            }
+        } else {
+            let mut new_buffer: Vec<u8>;
+            if let Some(vec) = self.buffer_storage.pop() {
+                new_buffer = vec;
+                new_buffer.resize(self.buffer_size, 0);
+            } else {
+                new_buffer = vec![0; self.buffer_size];
+            }
+            let index: usize = find_last_linebreak(&old_buffer).unwrap();
+            self.buffer_offset = old_buffer.len() - 1 - index;
+            for (i, chr) in old_buffer.drain(index..).skip(1).enumerate() {
+                new_buffer[i] = chr;
+            }
             self.buffer = Some(new_buffer);
+            Some(old_buffer)
         }
-        Some(old_buffer)
     }
 }
 fn main() -> io::Result<()> {
@@ -174,15 +193,16 @@ fn find_last_linebreak(buffer: &[u8]) -> Option<usize> {
     }
     None
 }
+fn request_buffer(buffer_manager: &Arc<Mutex<BufferManager>>) -> Option<Vec<u8>> {
+    buffer_manager.lock().unwrap().request_buffer()
+}
 #[inline(always)]
 fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<String, Station>>) {
     thread::spawn(move || {
         let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
-        let mut possible_buffer: Option<Vec<u8>> =
-            { buffer_manager.lock().unwrap().request_buffer() };
-        while let Some(buffer) = possible_buffer {
+        while let Some(buffer) = request_buffer(&buffer_manager) {
             process_buffer(&buffer, &mut map);
-            possible_buffer = buffer_manager.lock().unwrap().request_buffer();
+            buffer_manager.lock().unwrap().buffer_storage.push(buffer);
         }
         tx.send(map).unwrap();
     });
