@@ -7,7 +7,7 @@ use std::{
     io::{self, Read, Write},
     str,
     sync::{
-        mpsc::{self, Sender},
+        mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     },
     thread, vec,
@@ -68,15 +68,15 @@ struct BufferManager {
     file: fs::File,
     buffer: Option<Vec<u8>>,
     buffer_offset: usize,
-    buffer_storage: Vec<Vec<u8>>,
+    consumed_buffer_receiver: Receiver<Vec<u8>>,
 }
 impl BufferManager {
-    fn with(file: fs::File) -> BufferManager {
+    fn with(file: fs::File, consumed_buffer_receiver: Receiver<Vec<u8>>) -> BufferManager {
         BufferManager {
             file,
             buffer: Some(vec![0; BUFFER_SIZE]),
             buffer_offset: 0,
-            buffer_storage: Vec::new(),
+            consumed_buffer_receiver,
         }
     }
     #[inline(always)]
@@ -95,12 +95,12 @@ impl BufferManager {
             };
         }
 
-        let mut new_buffer: Vec<u8> = match self.buffer_storage.pop() {
-            Some(mut vec) => {
+        let mut new_buffer: Vec<u8> = match self.consumed_buffer_receiver.try_recv() {
+            Ok(mut vec) => {
                 vec.resize(BUFFER_SIZE, 0);
                 vec
             }
-            None => vec![0; BUFFER_SIZE],
+            Err(_) => vec![0; BUFFER_SIZE],
         };
         for (offset, byte) in old_buffer.iter().rev().enumerate() {
             if *byte == b'\n' {
@@ -146,7 +146,7 @@ fn print_map(mut map: HashMap<String, Station>) {
     writeln!(lock, " }}").unwrap();
 }
 #[inline]
-fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<String, Station>) {
+fn merge_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<String, Station>) {
     for (name, tmp_station) in tmp_map.drain() {
         main_map
             .entry(name)
@@ -158,22 +158,30 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
     let mut map: HashMap<String, Station> = HashMap::with_capacity(0);
     let mut n_current_threads: usize = 0;
 
-    let buffer_manager: Arc<Mutex<BufferManager>> = Arc::new(Mutex::new(BufferManager::with(file)));
-    let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
+    let (consumed_buffer_sender, consumed_buffer_receiver) = mpsc::channel::<Vec<u8>>();
+    let buffer_manager: Arc<Mutex<BufferManager>> = Arc::new(Mutex::new(BufferManager::with(
+        file,
+        consumed_buffer_receiver,
+    )));
+    let (map_sender, map_receiver) = mpsc::channel::<HashMap<String, Station>>();
 
     while n_current_threads < N_MAX_THREADS {
-        new_thread(buffer_manager.clone(), tx.clone());
+        new_thread(
+            buffer_manager.clone(),
+            map_sender.clone(),
+            consumed_buffer_sender.clone(),
+        );
         n_current_threads += 1;
     }
 
     loop {
-        let tmp_map: HashMap<String, Station> = rx.recv().unwrap();
+        let tmp_map: HashMap<String, Station> = map_receiver.recv().unwrap();
         n_current_threads -= 1;
 
         if map.is_empty() {
             map = tmp_map;
         } else {
-            update_maps(&mut map, tmp_map);
+            merge_maps(&mut map, tmp_map);
         }
 
         if n_current_threads == 0 {
@@ -184,18 +192,21 @@ fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
 fn request_buffer(buffer_manager: &Arc<Mutex<BufferManager>>) -> Option<Vec<u8>> {
     buffer_manager.lock().unwrap().request_buffer()
 }
-#[inline(always)]
-fn new_thread(buffer_manager: Arc<Mutex<BufferManager>>, tx: Sender<HashMap<String, Station>>) {
+fn new_thread(
+    buffer_manager: Arc<Mutex<BufferManager>>,
+    map_sender: Sender<HashMap<String, Station>>,
+    consumed_buffer_sender: Sender<Vec<u8>>,
+) {
     thread::spawn(move || {
         let mut map: HashMap<String, Station> = HashMap::with_capacity(10_000);
         while let Some(buffer) = request_buffer(&buffer_manager) {
             process_buffer(&buffer, &mut map);
-            buffer_manager.lock().unwrap().buffer_storage.push(buffer);
+            consumed_buffer_sender.send(buffer).unwrap();
         }
-        tx.send(map).unwrap();
+        map_sender.send(map).unwrap();
     });
 }
-#[inline(always)]
+#[inline]
 fn process_buffer(buffer: &[u8], map: &mut HashMap<String, Station>) {
     let string_slice = unsafe { str::from_utf8_unchecked(buffer) };
     for line in string_slice.lines() {
