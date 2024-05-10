@@ -3,9 +3,8 @@ mod tests;
 
 use hashbrown::HashMap;
 use std::{
-    env, fs,
+    fs,
     io::{self, Read, Write},
-    num::NonZeroUsize,
     str,
     sync::{
         mpsc::{self, Sender},
@@ -13,6 +12,10 @@ use std::{
     },
     thread, vec,
 };
+
+const BUFFER_SIZE: usize = 100_000_000;
+const PATH: &str = "1brc/data/measurements.txt";
+const N_MAX_THREADS: usize = 8;
 
 #[derive(Debug)]
 struct Station {
@@ -65,16 +68,14 @@ struct BufferManager {
     file: fs::File,
     buffer: Option<Vec<u8>>,
     buffer_offset: usize,
-    buffer_size: usize,
     buffer_storage: Vec<Vec<u8>>,
 }
 impl BufferManager {
-    fn with(file: fs::File, size: usize) -> BufferManager {
+    fn with(file: fs::File) -> BufferManager {
         BufferManager {
             file,
-            buffer: Some(vec![0; size]),
+            buffer: Some(vec![0; BUFFER_SIZE]),
             buffer_offset: 0,
-            buffer_size: size,
             buffer_storage: Vec::new(),
         }
     }
@@ -86,43 +87,43 @@ impl BufferManager {
             .read(&mut old_buffer[self.buffer_offset..])
             .unwrap();
 
-        if self.buffer_offset + copied_data_len < self.buffer_size {
+        if self.buffer_offset + copied_data_len < BUFFER_SIZE {
             old_buffer.truncate(self.buffer_offset + copied_data_len);
-            match old_buffer.is_empty() {
+            return match old_buffer.is_empty() {
                 true => None,
                 false => Some(old_buffer),
-            }
-        } else {
-            let mut new_buffer: Vec<u8>;
-            if let Some(vec) = self.buffer_storage.pop() {
-                new_buffer = vec;
-                new_buffer.resize(self.buffer_size, 0);
-            } else {
-                new_buffer = vec![0; self.buffer_size];
-            }
-            let index: usize = find_last_linebreak(&old_buffer).unwrap();
-            self.buffer_offset = old_buffer.len() - 1 - index;
-            for (i, chr) in old_buffer.drain(index..).skip(1).enumerate() {
-                new_buffer[i] = chr;
-            }
-            self.buffer = Some(new_buffer);
-            Some(old_buffer)
+            };
         }
+
+        let mut new_buffer: Vec<u8> = match self.buffer_storage.pop() {
+            Some(mut vec) => {
+                vec.resize(BUFFER_SIZE, 0);
+                vec
+            }
+            None => vec![0; BUFFER_SIZE],
+        };
+        for (offset, byte) in old_buffer.iter().rev().enumerate() {
+            if *byte == b'\n' {
+                self.buffer_offset = offset;
+                break;
+            }
+        }
+        // since the buffer is full there must be a linebreak
+
+        if self.buffer_offset > 0 {
+            let new_buffer_slice: &mut [u8] = &mut new_buffer[..self.buffer_offset];
+            new_buffer_slice
+                .copy_from_slice(&old_buffer[(old_buffer.len() - self.buffer_offset)..]);
+        }
+        old_buffer.truncate(old_buffer.len() - self.buffer_offset - 1);
+
+        self.buffer = Some(new_buffer);
+        Some(old_buffer)
     }
 }
 fn main() -> io::Result<()> {
-    let mut args = env::args().skip(1);
-    let path = args
-        .next()
-        .unwrap_or(String::from("1brc/data/measurements.txt"));
-
-    let buffer_size: usize = match args.next() {
-        Some(string) => string.parse().unwrap(),
-        None => 100_000_000,
-    };
-
-    let file: fs::File = fs::File::open(path)?;
-    let map = create_map_from_file(file, buffer_size);
+    let file: fs::File = fs::File::open(PATH)?;
+    let map = create_map_from_file(file);
     print_map(map);
     Ok(())
 }
@@ -153,18 +154,15 @@ fn update_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<Str
             .or_insert(tmp_station);
     }
 }
-fn create_map_from_file(file: fs::File, buffer_size: usize) -> HashMap<String, Station> {
+fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
     let mut map: HashMap<String, Station> = HashMap::with_capacity(0);
-    let max_threads: NonZeroUsize =
-        thread::available_parallelism().unwrap_or(NonZeroUsize::new(8).unwrap());
     let mut n_current_threads: usize = 0;
 
-    let buffer_manager: Arc<Mutex<BufferManager>> =
-        Arc::new(Mutex::new(BufferManager::with(file, buffer_size)));
+    let buffer_manager: Arc<Mutex<BufferManager>> = Arc::new(Mutex::new(BufferManager::with(file)));
     let (tx, rx) = mpsc::channel::<HashMap<String, Station>>();
 
-    while n_current_threads < usize::from(max_threads) {
-        new_thread(Arc::clone(&buffer_manager), tx.clone());
+    while n_current_threads < N_MAX_THREADS {
+        new_thread(buffer_manager.clone(), tx.clone());
         n_current_threads += 1;
     }
 
@@ -182,16 +180,6 @@ fn create_map_from_file(file: fs::File, buffer_size: usize) -> HashMap<String, S
             return map;
         }
     }
-}
-#[inline(always)]
-fn find_last_linebreak(buffer: &[u8]) -> Option<usize> {
-    for (index, byte) in buffer.iter().enumerate().rev() {
-        // TODO: Is this how UTF-8 works?
-        if *byte == b'\n' {
-            return Some(index);
-        }
-    }
-    None
 }
 fn request_buffer(buffer_manager: &Arc<Mutex<BufferManager>>) -> Option<Vec<u8>> {
     buffer_manager.lock().unwrap().request_buffer()
