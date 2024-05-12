@@ -113,8 +113,22 @@ impl BufferManager {
     }
 }
 fn main() -> io::Result<()> {
-    let file: fs::File = fs::File::open(PATH)?;
-    let map = create_map_from_file(file);
+    let buffer_manager: Arc<Mutex<BufferManager>> =
+        Arc::new(Mutex::new(BufferManager::with(fs::File::open(PATH)?)));
+    let (map_sender, map_receiver) = mpsc::channel::<HashMap<String, Station>>();
+
+    for _ in 0..N_MAX_THREADS {
+        new_thread(buffer_manager.clone(), map_sender.clone());
+    }
+
+    let mut map: HashMap<String, Station> = map_receiver.recv().unwrap();
+    for _ in 1..N_MAX_THREADS {
+        for (name, tmp_station) in map_receiver.recv().unwrap().drain() {
+            map.entry(name)
+                .and_modify(|station| station.join(&tmp_station))
+                .or_insert(tmp_station);
+        }
+    }
     print_map(map);
     Ok(())
 }
@@ -136,29 +150,7 @@ fn print_map(mut map: HashMap<String, Station>) {
     }
     writeln!(lock, " }}").unwrap();
 }
-#[inline]
-fn merge_maps(main_map: &mut HashMap<String, Station>, mut tmp_map: HashMap<String, Station>) {
-    for (name, tmp_station) in tmp_map.drain() {
-        main_map
-            .entry(name)
-            .and_modify(|station| station.join(&tmp_station))
-            .or_insert(tmp_station);
-    }
-}
-fn create_map_from_file(file: fs::File) -> HashMap<String, Station> {
-    let buffer_manager: Arc<Mutex<BufferManager>> = Arc::new(Mutex::new(BufferManager::with(file)));
-    let (map_sender, map_receiver) = mpsc::channel::<HashMap<String, Station>>();
 
-    for _ in 0..N_MAX_THREADS {
-        new_thread(buffer_manager.clone(), map_sender.clone());
-    }
-
-    let mut map: HashMap<String, Station> = map_receiver.recv().unwrap();
-    for _ in 1..N_MAX_THREADS {
-        merge_maps(&mut map, map_receiver.recv().unwrap());
-    }
-    map
-}
 fn new_thread(
     buffer_manager: Arc<Mutex<BufferManager>>,
     map_sender: Sender<HashMap<String, Station>>,
